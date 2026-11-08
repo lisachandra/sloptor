@@ -8,9 +8,8 @@
 use rotor_tsrs::ast::{self as tsast, INTERNAL_SYMBOL_NAME_MISSING};
 use rotor_tsrs::checker::ContextFlags;
 
-use crate::access::is_valid_method_index_without_call;
 use crate::diagnostics;
-use crate::ismethod::{is_method, is_method_from_type};
+use crate::ismethod::is_method_from_type;
 use crate::prelude::*;
 use crate::types::walk_types;
 
@@ -35,41 +34,6 @@ pub fn validate_types(state: &mut State<'_>, node: P<Node>, base_type: P<Type>, 
 			}
 		}
 	}
-}
-
-/// `validateMethodExpression`: an expression's method-ness against its contextual type.
-pub fn validate_method_expression(state: &mut State<'_>, node: P<Node>) {
-	let Some(parent) = tsast::skip_upwards(node).parent() else {
-		return;
-	};
-	if tsast::is_property_assignment(parent) || tsast::is_shorthand_property_assignment(parent) {
-		return;
-	}
-	let t = state.get_type(node);
-	if !has_call_signatures(state, t) {
-		return;
-	}
-	let Some(contextual_type) = state
-		.ck()
-		.get_contextual_type(node, ContextFlags::None)
-		.filter(|&contextual_type| contextual_type != t)
-	else {
-		return;
-	};
-	let expression = tsast::skip_downwards(node);
-	if tsast::is_function_expression(expression)
-		&& is_method(state, expression) == is_method_from_type(state, node, contextual_type)
-	{
-		return;
-	}
-	let is_access = tsast::is_property_access_expression(expression) || tsast::is_element_access_expression(expression);
-	if is_access
-		&& !is_valid_method_index_without_call(state, tsast::skip_upwards(node))
-		&& is_method_from_type(state, node, t)
-	{
-		return;
-	}
-	validate_types(state, node, t, contextual_type);
 }
 
 /// `validateObjectLiteralElement` (L29-35).

@@ -6,8 +6,6 @@
 //! `TS.TRY_BREAK`/`TS.TRY_CONTINUE` for rerouted break/continue, or `TS.TRY_RETURN, { ... }` for
 //! a rerouted return.
 
-use rotor_tsrs::ast::{self as tsast};
-
 use super::{is_break_blocked_by_try_statement, is_return_blocked_by_try_statement};
 use crate::expressions::transform_binding_name;
 use crate::prelude::*;
@@ -112,22 +110,18 @@ struct FlowControlCase {
 	statements: Statements,
 }
 
-/// `collapseFlowControlCases`: an elseif chain. The last case checks only `exitTypeId` unless
-/// normal completion has been ruled out, when it is unconditional.
+/// `collapseFlowControlCases`: an elseif chain, the last case checking only `exitTypeId`.
 fn collapse_flow_control_cases(
 	state: &mut State<'_>,
 	exit_type_id: NodeId,
 	cases: &[FlowControlCase],
-	always_exits: bool,
 ) -> Statements {
 	let Some((final_case, rest)) = cases.split_last() else {
 		state.ice("transformer: collapseFlowControlCases: no cases");
 		return state.ast.new_list();
 	};
 
-	let mut next = if always_exits {
-		NodeOrList::from(final_case.statements)
-	} else {
+	let mut next = {
 		let empty = state.ast.new_list::<element::Statement>();
 		NodeOrList::from(
 			state
@@ -147,53 +141,6 @@ fn collapse_flow_control_cases(
 	}
 }
 
-/// `statementAlwaysExits` is deliberately syntactic: a call typed never can still return at
-/// runtime. Loops and switches are not exits from their containing block.
-fn statement_always_exits(node: Option<P<Node>>) -> bool {
-	let Some(node) = node else {
-		return false;
-	};
-	match node.kind() {
-		Kind::ReturnStatement | Kind::ThrowStatement | Kind::BreakStatement | Kind::ContinueStatement => true,
-		Kind::IfStatement => {
-			let statement = node.as_if_statement();
-			statement_always_exits(Some(statement.then_statement)) && statement_always_exits(statement.else_statement)
-		}
-		Kind::Block => node
-			.statements()
-			.iter()
-			.any(|&statement| statement_always_exits(Some(statement))),
-		_ => false,
-	}
-}
-
-fn try_always_exits(node: P<Node>) -> bool {
-	let statement = node.as_try_statement();
-	if !statement_always_exits(Some(statement.try_block))
-		|| statement
-			.catch_clause
-			.is_some_and(|clause| !statement_always_exits(Some(clause.as_catch_clause().block)))
-	{
-		return false;
-	}
-	// Keep the guarded output when more statements follow. In particular, a bare Luau return
-	// must be the last statement, including in generated blocks.
-	let Some(parent) = node.parent() else {
-		return false;
-	};
-	if tsast::is_if_statement(parent)
-		|| tsast::is_iteration_statement(parent, false)
-		|| tsast::is_labeled_statement(parent)
-	{
-		return true;
-	}
-	let statements = match parent.kind() {
-		Kind::Block | Kind::CaseClause | Kind::DefaultClause => parent.statements(),
-		_ => return false,
-	};
-	statements.last() == Some(&node)
-}
-
 /// `transformFlowControl` (L109-186): the post-try dispatch on `_exitType`. The blocked checks
 /// start at the try's parent. The propagation marks land on the enclosing try's uses, because
 /// the caller popped this try's entry first.
@@ -205,7 +152,6 @@ fn transform_flow_control(
 	try_uses: TryUses,
 ) -> Statements {
 	let mut flow_control_cases = Vec::new();
-	let always_exits = try_always_exits(node);
 
 	if !try_uses.uses_return && !try_uses.uses_break && !try_uses.uses_continue {
 		return state.ast.new_list();
@@ -235,7 +181,7 @@ fn transform_flow_control(
 				statements: state.ast.list_from([statement]),
 			});
 			if break_blocked {
-				return collapse_flow_control_cases(state, exit_type_id, &flow_control_cases, always_exits);
+				return collapse_flow_control_cases(state, exit_type_id, &flow_control_cases);
 			}
 		} else {
 			let unpack = state.ast.global_id("unpack");
@@ -276,7 +222,7 @@ fn transform_flow_control(
 		}
 	}
 
-	collapse_flow_control_cases(state, exit_type_id, &flow_control_cases, always_exits)
+	collapse_flow_control_cases(state, exit_type_id, &flow_control_cases)
 }
 
 /// `transformTryStatement` (L188-200). Ordering is load-bearing twice: the exit type and returns

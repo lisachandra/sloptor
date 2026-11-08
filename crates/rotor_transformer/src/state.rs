@@ -118,6 +118,11 @@ pub struct RojoContext {
 	pub project_reference_paths: HashMap<String, String>,
 	/// Upstream `data.nodeModulesPath`: `<package.json dir>/node_modules`.
 	pub node_modules_path: String,
+	/// `rbxts.runtimeRoots`: physical `node_modules` directories, index-aligned with the
+	/// `ReplicatedStorage.TS.rbxts_include.node_modules` and
+	/// `ServerScriptService.TS.rbxts_include.node_modules` mounts. Empty means "type roots are
+	/// also the runtime roots", matching upstream.
+	pub runtime_roots: Vec<String>,
 	/// `compilerOptions.typeRoots`, absolute and slash-separated.
 	pub type_roots: Vec<String>,
 	/// Feeds the canonical file name lookups.

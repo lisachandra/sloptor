@@ -15,7 +15,7 @@ use crate::access::{
 use crate::control;
 use crate::ensureorder::ensure_transform_order;
 use crate::exports::is_symbol_mutable;
-use crate::ismethod::{is_method, is_method_from_type};
+use crate::ismethod::is_method;
 use crate::prelude::*;
 use crate::spreadhelpers::array_like_expression_contains_spread;
 use crate::statements::check_variable_hoist;
@@ -393,11 +393,6 @@ pub fn transform_call_expression_inner(
 		expression = state.push_to_var(Some(expression), "fn");
 	}
 	state.prereq_list(prereqs);
-
-	if is_method_from_type(state, call.expression, expression_type) {
-		let nil = state.ast.nil();
-		args.insert(0, nil);
-	}
 
 	let callee = convert_to_indexable_expression(&mut state.ast, expression);
 	let args = state.ast.list_from(args);

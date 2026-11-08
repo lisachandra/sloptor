@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rotor_config::dotenv::Env;
-use rotor_rojo::{NetworkType, PathTranslator, RbxPathLookup, RojoResolver, RojoResolverCache};
+use rotor_rojo::{NetworkType, PathTranslator, RojoResolver, RojoResolverCache};
 use rotor_support::{gopath, logservice};
 use rotor_transformer::{MultiState, NodeModulesPathMapping, ProjectType, RojoContext, State, StateOptions};
 use rotor_tsrs::ast::{self, SourceFile};
@@ -219,6 +219,9 @@ pub struct ProjectOptions {
 	pub single_threaded: Option<bool>,
 	/// The `--rojo` override; empty auto-discovers.
 	pub rojo_config_path: String,
+	/// `rbxts.runtimeRoots`: physical `node_modules` directories the emitted package imports
+	/// resolve through, aligned with the Rojo mounts. Empty means "same as the type roots".
+	pub runtime_roots: Option<Vec<String>>,
 	/// `--logTruthyChanges`
 	pub log_truthy_changes: bool,
 	/// `--allowCommentDirectives`
@@ -393,6 +396,17 @@ pub(crate) fn resolve_include_path(dir: &str, include_path: &str) -> Result<Stri
 	Ok(canonical_explicit_path(&abs))
 }
 
+/// [`resolve_include_path`] without the symlink canonicalization: the spelling a Rojo tree is
+/// keyed by. Upstream resolves the include path with `path.resolve` only, so a Rojo `$path` that
+/// names the logical directory still matches when that directory is a symlink.
+pub(crate) fn resolve_include_path_logical(dir: &str, include_path: &str) -> Result<String, Error> {
+	if include_path.is_empty() {
+		return Ok(gopath::join(&[&gopath::from_slash(dir), "include"]));
+	}
+	let abs = gopath::abs(&gopath::from_slash(include_path)).map_err(|error| Error::message(error.to_string()))?;
+	Ok(gopath::clean(&gopath::from_slash(&gopath::to_slash(&abs)).into_owned()))
+}
+
 /// `newProjectContext` (`compileFiles.ts` L56-100): the Rojo resolver, `checkRojoConfig` and
 /// `checkFileName`, the project type, and the runtime library path's validation.
 ///
@@ -486,7 +500,21 @@ pub(crate) fn new_project_context_with_import_context(
 		None
 	} else {
 		let runtime_lib = gopath::join(&[&include_path, "RuntimeLib.lua"]);
-		let RbxPathLookup::Found(path) = rojo_resolver.lookup_rbx_path(&runtime_lib) else {
+		// The include folder is often reached through a symlink (a workspace package's `out/`, a
+		// pnpm store entry), while the Rojo tree maps the logical path the user wrote. Upstream
+		// looks the logical path up only; try it first, then the physical spelling so a
+		// symlink-free mount keeps working.
+		let logical = gopath::join(&[
+			&resolve_include_path_logical(dir, &opts.include_path).map_err(Failure::bare)?,
+			"RuntimeLib.lua",
+		]);
+		let lookup = || {
+			rojo_resolver
+				.lookup_rbx_path(&logical)
+				.found()
+				.or_else(|| rojo_resolver.lookup_rbx_path(&runtime_lib).found())
+		};
+		let Some(path) = lookup() else {
 			return Err(emit_failure("Rojo project contained no data for include folder!"));
 		};
 		if rojo_resolver.get_network_type(&path) != NetworkType::Unknown {
@@ -529,6 +557,7 @@ pub(crate) fn new_project_context_with_import_context(
 					&type_roots,
 					use_case_sensitive_file_names,
 					options.custom_conditions.as_deref().unwrap_or_default(),
+					opts.runtime_roots.as_deref().unwrap_or_default(),
 				);
 			}
 		}
@@ -562,6 +591,7 @@ pub(crate) fn new_project_context_with_import_context(
 			node_modules_path_mapping: node_modules_mapping,
 			project_reference_paths: import_path_map,
 			node_modules_path,
+			runtime_roots: opts.runtime_roots.clone().unwrap_or_default(),
 			type_roots,
 			use_case_sensitive_file_names,
 		},

@@ -7,7 +7,12 @@ HK_MISE = 1
 experimental = true
 auto_install = false
 lockfile = true
-cargo.binstall_native = true
+# `cargo.binstall_native` was set here until upstream a1a244c, but it is not a
+# mise settings key: `cargo` accepts `binstall`, `binstall_only` and
+# `registry_name`, and anything else fails the whole file to parse —
+# "unknown field `binstall_native`" — which takes every `cargo` and `mise`
+# invocation with it, including the release build. Removed so the toolchain
+# loads; add it back only if mise ever grows the key.
 
 [tools]
 "cargo:cargo-nextest" = "latest"

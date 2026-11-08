@@ -32,6 +32,10 @@ pub struct RbxtsOptions {
 	pub optimized_loops: Option<bool>,
 	/// `rojo`, resolved against the declaring config.
 	pub rojo: Option<String>,
+	/// `runtimeRoots`: where packages are mounted at runtime, index-aligned with the Rojo tree
+	/// positions `ReplicatedStorage.TS.rbxts_include.node_modules` and
+	/// `ServerScriptService.TS.rbxts_include.node_modules`. Resolved against the declaring config.
+	pub runtime_roots: Option<Vec<String>>,
 	/// `type`: `game`, `model` or `package`.
 	pub project_type: Option<String>,
 	/// The configs of the chain that declared options, when read with the chain.
@@ -114,7 +118,7 @@ fn read_rbxts_options_from(
 }
 
 /// `rbxtsOptionKeys`
-const RBXTS_OPTION_KEYS: [&str; 11] = [
+const RBXTS_OPTION_KEYS: [&str; 12] = [
 	"allowCommentDirectives",
 	"includePath",
 	"logTruthyChanges",
@@ -125,6 +129,7 @@ const RBXTS_OPTION_KEYS: [&str; 11] = [
 	"optimizedArrayAppends",
 	"optimizedLoops",
 	"rojo",
+	"runtimeRoots",
 	"type",
 ];
 
@@ -149,6 +154,7 @@ fn parse_rbxts_options(raw: &Map<String, Value>, config_path: &str) -> Result<Rb
 		optimized_loops: rbxts_boolean(raw, "optimizedLoops", config_path)?,
 		include_path: rbxts_path(raw, "includePath", config_path)?,
 		rojo: rbxts_path(raw, "rojo", config_path)?,
+		runtime_roots: rbxts_paths(raw, "runtimeRoots", config_path)?,
 		..RbxtsOptions::default()
 	};
 	if let Some(value) = raw.get("type") {
@@ -194,6 +200,29 @@ fn rbxts_path(raw: &Map<String, Value>, key: &str, config_path: &str) -> Result<
 			Ok(Some(text.clone()))
 		}
 		Some(value) => Err(rbxts_type_error(config_path, key, "a string", value)),
+	}
+}
+
+/// `rbxtsPaths`: a string array, each entry resolved against the declaring config's directory
+/// when relative.
+fn rbxts_paths(raw: &Map<String, Value>, key: &str, config_path: &str) -> Result<Option<Vec<String>>, Error> {
+	match raw.get(key) {
+		None => Ok(None),
+		Some(Value::Array(items)) => {
+			let mut paths = Vec::with_capacity(items.len());
+			for item in items {
+				let Value::String(text) = item else {
+					return Err(rbxts_type_error(config_path, key, "an array of strings", item));
+				};
+				if !text.is_empty() && !gopath::is_abs(text) {
+					paths.push(gopath::join(&[&gopath::dir(config_path), &gopath::from_slash(text)]));
+				} else {
+					paths.push(text.clone());
+				}
+			}
+			Ok(Some(paths))
+		}
+		Some(value) => Err(rbxts_type_error(config_path, key, "an array of strings", value)),
 	}
 }
 
@@ -244,6 +273,7 @@ pub fn merge_rbxts_options(base: Option<RbxtsOptions>, overlay: Option<RbxtsOpti
 		optimized_array_appends,
 		optimized_loops,
 		rojo,
+		runtime_roots,
 		project_type
 	);
 	Some(result)

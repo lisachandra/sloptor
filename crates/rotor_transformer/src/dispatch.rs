@@ -10,14 +10,13 @@ use rotor_tsrs::ast as tsast;
 use crate::prelude::*;
 use crate::{
 	access, binary, call, classes, conditional, control, delete, diagnostics, expressions, extras, identifier,
-	literals, loops, luau_types, methodassignment, newexpression, statements, unary, voidexpr,
+	literals, loops, luau_types, newexpression, statements, unary, voidexpr,
 };
 
 /// `TransformExpression`: dispatches on the node's kind. Banned kinds add their diagnostic and
 /// return `None` (no emit); diagnostics never abort the walk.
 pub fn transform_expression(state: &mut State<'_>, node: P<Node>) -> NodeId {
 	let expression = transform_expression_kind(state, node);
-	methodassignment::validate_method_expression(state, node);
 	if state.source_map_enabled {
 		return tag_expression_origin(state, expression, node);
 	}

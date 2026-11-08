@@ -126,11 +126,24 @@ fn get_relative_import(state: &mut State<'_>, source_rbx_path: &[String], module
 }
 
 /// `validateModule` (L49-59): the scope's directory must equal one of the type roots.
+///
+/// With `rbxts.runtimeRoots` configured the scope may also live under a runtime root, since the
+/// packages the game imports are mounted from those directories rather than from the project's
+/// own `node_modules`. A runtime root whose basename is `node_modules` is accepted for any scope
+/// it contains, mirroring the `@isentinel/roblox-ts` fork this behavior comes from.
 fn validate_module(rojo: &RojoContext, scope: &str) -> bool {
 	let scoped_modules = gopath::clean(&gopath::join(&[&rojo.node_modules_path, scope]));
-	rojo.type_roots
+	if rojo
+		.type_roots
 		.iter()
 		.any(|type_root| scoped_modules == gopath::clean(&gopath::from_slash(type_root)))
+	{
+		return true;
+	}
+	rojo.runtime_roots.iter().any(|runtime_root| {
+		let root = gopath::clean(&gopath::from_slash(runtime_root));
+		scoped_modules == gopath::clean(&gopath::join(&[&root, scope]))
+	})
 }
 
 /// `findRelativeRbxPath` (L61-68): the first package resolver that covers the path wins. A
@@ -154,6 +167,15 @@ fn get_paths_with_scope(resolver: &RojoResolver, module_scope: &str) -> Vec<Stri
 
 fn split_native(path: &str) -> Vec<String> {
 	path.split(gopath::NATIVE.separator()).map(str::to_owned).collect()
+}
+
+/// The text of a module specifier node, when it is a string literal.
+fn module_specifier_text(module_specifier: P<Node>) -> Option<String> {
+	if tsast::is_string_literal_like(module_specifier) {
+		Some(module_specifier.text().to_owned())
+	} else {
+		None
+	}
 }
 
 fn realpath(path: &str) -> String {
@@ -258,15 +280,32 @@ fn get_node_modules_import_parts(
 	module_specifier: P<Node>,
 	module_out_path: &str,
 ) -> Vec<NodeId> {
-	let rel = match gopath::rel(&rojo.node_modules_path, module_out_path) {
-		Ok(rel) if !rel.is_empty() => rel,
-		_ => {
-			state.ice("transformer: getNodeModulesImportParts: no module scope");
-			return none_parts(state);
+	// The scope is the package's npm scope (`@rbxts`, `@lisachandra`). With runtime roots the path
+	// may be relative to any of them, so the scope comes from the specifier, which is what the
+	// upstream fork this behavior mirrors does. Otherwise keep the path-relative derivation.
+	let module_scope = if rojo.runtime_roots.is_empty() {
+		match gopath::rel(&rojo.node_modules_path, module_out_path) {
+			Ok(rel) if !rel.is_empty() => split_native(&rel)[0].clone(),
+			_ => {
+				state.ice("transformer: getNodeModulesImportParts: no module scope");
+				return none_parts(state);
+			}
+		}
+	} else {
+		match module_specifier_text(module_specifier) {
+			Some(text) if text.starts_with('@') => match text.split('/').next() {
+				Some(scope) if !scope.is_empty() => scope.to_owned(),
+				_ => {
+					state.diags.add(diagnostics::no_unscoped_module(module_specifier));
+					return none_parts(state);
+				}
+			},
+			_ => {
+				state.diags.add(diagnostics::no_unscoped_module(module_specifier));
+				return none_parts(state);
+			}
 		}
 	};
-	let rel_segments = split_native(&rel);
-	let module_scope = rel_segments[0].clone();
 
 	if !module_scope.starts_with('@') {
 		state.diags.add(diagnostics::no_unscoped_module(module_specifier));
@@ -277,7 +316,6 @@ fn get_node_modules_import_parts(
 		state.diags.add(diagnostics::no_invalid_module(module_specifier));
 		return none_parts(state);
 	}
-
 	if state.project_type == Some(ProjectType::Package) {
 		let Some(relative_rbx_path) = find_relative_rbx_path(module_out_path, &rojo.pkg_rojo_resolvers) else {
 			let path = rel_to_project(rojo, module_out_path);
@@ -311,12 +349,19 @@ fn get_node_modules_import_parts(
 		module_rbx_path = rojo.resolver.get_rbx_path_from_file_path(&resolved);
 	}
 	if module_rbx_path.is_none() {
-		let package_relative_path = &rel_segments[1..];
-		for scope_path in get_paths_with_scope(&rojo.resolver, &module_scope) {
-			let candidate = join_inner(&scope_path, package_relative_path);
-			if let Some(resolved_path) = rojo.resolver.get_rbx_path_from_file_path(&candidate) {
-				module_rbx_path = Some(resolved_path);
-				break;
+		// The scope-free package path: everything after `@scope/` on the specifier, so the
+		// lookup works no matter which root the package physically resolved through.
+		let package_relative_path: Vec<String> = match module_specifier_text(module_specifier) {
+			Some(text) => text.split('/').skip(1).map(str::to_owned).collect(),
+			None => Vec::new(),
+		};
+		if !package_relative_path.is_empty() {
+			for scope_path in get_paths_with_scope(&rojo.resolver, &module_scope) {
+				let candidate = join_inner(&scope_path, &package_relative_path);
+				if let Some(resolved_path) = rojo.resolver.get_rbx_path_from_file_path(&candidate) {
+					module_rbx_path = Some(resolved_path);
+					break;
+				}
 			}
 		}
 	}
@@ -467,9 +512,12 @@ fn get_import_parts_impl(
 	}
 
 	let is_node_module = is_inside_node_modules(&virtual_path) || has_mapped_path;
-	// A package reaches a referenced package through getModule, never through a Rojo path, so its
-	// output stays relocatable. The reference map only supplies the Luau path inside the package.
-	if is_node_module && (reference_path.is_none() || state.project_type == Some(ProjectType::Package)) {
+	// Upstream's condition is exactly "the file is inside node_modules, or it mapped there". A
+	// referenced package that is also a node module (a workspace package symlinked into
+	// `node_modules`) must take this branch too: its Rojo location is the mount, which
+	// `reference_package_path` below rebases onto. Letting a reference path divert it would emit a
+	// project-relative path the game never mounts.
+	if is_node_module {
 		let module_out_path = reference_path
 			.as_ref()
 			.and_then(|reference_path| reference_package_path(rojo, &mapped_path, reference_path))

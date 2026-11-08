@@ -25,6 +25,8 @@ pub struct PartialOptions {
 	pub allow_comment_directives: Option<bool>,
 	pub luau: Option<bool>,
 	pub luau_types: Option<bool>,
+	/// `rbxts.runtimeRoots`: tsconfig-only, so the CLI layer never sets it.
+	pub runtime_roots: Option<Vec<String>>,
 }
 
 impl PartialOptions {
@@ -42,6 +44,7 @@ impl PartialOptions {
 			optimized_array_appends: self.optimized_array_appends,
 			optimized_loops: self.optimized_loops,
 			rojo: self.rojo.clone(),
+			runtime_roots: self.runtime_roots.clone(),
 			project_type: self.type_name.clone(),
 			..RbxtsOptions::default()
 		}
@@ -70,6 +73,8 @@ pub struct MergedOptions {
 	pub allow_comment_directives: bool,
 	pub luau: bool,
 	pub luau_types: bool,
+	/// `rbxts.runtimeRoots`: tsconfig-only, so it has no CLI flag and no `false` default.
+	pub runtime_roots: Option<Vec<String>>,
 	pub emit_declaration_only: bool,
 	/// The argv layer of the merge.
 	pub argv: Option<PartialOptions>,
@@ -98,6 +103,7 @@ impl Default for MergedOptions {
 			allow_comment_directives: false,
 			luau: true,
 			luau_types: false,
+			runtime_roots: None,
 			emit_declaration_only: false,
 			argv: None,
 			builders: None,
@@ -121,6 +127,9 @@ pub fn merge_project_options(base: MergedOptions, layers: &[Option<&PartialOptio
 		}
 		if let Some(value) = &layer.type_name {
 			out.type_name.clone_from(value);
+		}
+		if let Some(value) = &layer.runtime_roots {
+			out.runtime_roots = Some(value.clone());
 		}
 		let flags = [
 			(&mut out.watch, layer.watch),
@@ -188,6 +197,7 @@ pub fn read_rbxts_layer(ts_config_path: &str) -> Result<Option<PartialOptions>, 
 		allow_comment_directives: rbxts.allow_comment_directives,
 		luau: rbxts.luau,
 		luau_types: rbxts.luau_types,
+		runtime_roots: rbxts.runtime_roots,
 		..PartialOptions::default()
 	}))
 }
@@ -201,6 +211,9 @@ pub fn project_compile_options(ts_config_path: &str, opts: &MergedOptions) -> Pr
 	compiled.emit_include_files = !opts.no_include;
 	compiled.project_type = rotor_compile::project::parse_project_type(&opts.type_name);
 	compiled.rojo_config_path.clone_from(&opts.rojo);
+	if let Some(roots) = &opts.runtime_roots {
+		compiled.runtime_roots = Some(roots.clone());
+	}
 	compiled.log_truthy_changes = opts.log_truthy_changes;
 	compiled.allow_comment_directives = opts.allow_comment_directives;
 	compiled.optimized_array_appends = opts.optimized_array_appends;

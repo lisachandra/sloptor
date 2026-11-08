@@ -127,18 +127,47 @@ pub(crate) fn legacy_package_paths(pkg_dir: &str, pkg: &PackageManifest) -> (Str
 }
 
 /// `createNodeModulesPathMapping`
+///
+/// `runtime_roots` (`rbxts.runtimeRoots`) names the `node_modules` trees the game mounts. A
+/// package's runtime path is taken from the first root that physically holds
+/// `<root>/<scope>/<package>`, so a package read through a public-hoisted type root still maps
+/// onto the per-service tree the game actually requires. Empty means "the type roots are the
+/// runtime roots", matching upstream.
 pub(crate) fn create_node_modules_path_mapping(
 	type_roots: &[String],
 	use_case_sensitive_file_names: bool,
 	custom_conditions: &[String],
+	runtime_roots: &[String],
 ) -> NodeModulesPathMapping {
 	build_node_modules_path_mappings(
 		type_roots,
 		use_case_sensitive_file_names,
 		custom_conditions,
+		runtime_roots,
 		&remap_to_rojo_tree,
 	)
 	.runtime
+}
+
+/// `runtimePackagePath`: the directory a package is mounted from.
+///
+/// Every runtime root is probed as `<root>/<scope basename>/<package basename>`, mirroring the
+/// upstream fork's `path.join(runtimeRoot, scopeName, packageName)` lookup: `scopePath` is a
+/// scope directory such as `node_modules/@lisachandra`, so its basename is the scope. The
+/// package's own directory is the fallback when no runtime root holds it.
+fn runtime_package_path(pkg_dir: &str, scope_path: &str, runtime_roots: &[String]) -> String {
+	if runtime_roots.is_empty() {
+		return pkg_dir.to_owned();
+	}
+	let scope_name = gopath::base(scope_path);
+	let package_name = gopath::base(pkg_dir);
+	for runtime_root in runtime_roots {
+		let candidate = gopath::join(&[&gopath::from_slash(runtime_root), &scope_name, &package_name]);
+		if std::fs::metadata(&candidate).is_ok() {
+			return candidate;
+		}
+	}
+	pkg_dir.to_owned()
 }
 
 /// `nodeModulesPathMappings`
@@ -157,6 +186,7 @@ pub(crate) fn build_node_modules_path_mappings(
 	type_roots: &[String],
 	use_case_sensitive_file_names: bool,
 	custom_conditions: &[String],
+	runtime_roots: &[String],
 	remap: Remap<'_>,
 ) -> NodeModulesPathMappings {
 	let mut mapping = NodeModulesPathMapping::default();
@@ -174,10 +204,14 @@ pub(crate) fn build_node_modules_path_mappings(
 				continue;
 			};
 			let virtual_mappings = package_mappings(&pkg_dir, &pkg, custom_conditions);
+			// The runtime tree may live somewhere other than the type root the package was read
+			// through; map onto the copy the game mounts.
+			let runtime_pkg_dir = runtime_package_path(&pkg_dir, &scope_path, runtime_roots);
+			let runtime_mappings = rebase_runtime_paths(&virtual_mappings, &pkg_dir, &runtime_pkg_dir);
 			add_package_mappings(
 				&mut mapping,
-				&pkg_dir,
-				&virtual_mappings,
+				&runtime_pkg_dir,
+				&runtime_mappings,
 				use_case_sensitive_file_names,
 				remap,
 			);
@@ -191,11 +225,13 @@ pub(crate) fn build_node_modules_path_mappings(
 				continue;
 			}
 			let real_mappings = package_mappings(&real_pkg_dir, &pkg, custom_conditions);
+			// The aliases a symlinked package is also reachable by must land on the same runtime
+			// tree, so pass the rebased mappings as the values.
 			add_real_path_aliases(
 				&mut mapping,
-				&pkg_dir,
+				&runtime_pkg_dir,
 				&real_mappings,
-				&virtual_mappings,
+				&runtime_mappings,
 				use_case_sensitive_file_names,
 				remap,
 			);
@@ -307,6 +343,39 @@ fn add_package_pattern(
 		types_suffix: suffix.to_owned(),
 		runtime,
 	});
+}
+
+/// `rebaseRuntimePaths`: the same mappings, with each runtime path moved from the type-root
+/// package directory onto the runtime package directory.
+///
+/// Only the leading package directory changes; a runtime path that is not inside `pkg_dir` (a
+/// package whose `main` points outside its own directory) is kept as authored.
+fn rebase_runtime_paths(
+	mappings: &[PackageExportMapping],
+	pkg_dir: &str,
+	runtime_pkg_dir: &str,
+) -> Vec<PackageExportMapping> {
+	if canonical_file_name(pkg_dir, true) == canonical_file_name(runtime_pkg_dir, true) {
+		return mappings.to_vec();
+	}
+	mappings
+		.iter()
+		.map(|mapping| {
+			let runtime_path = gopath::rel(pkg_dir, &gopath::from_slash(&mapping.runtime_path))
+				.ok()
+				.filter(|rel| rel != ".." && !rel.starts_with(".."))
+				.map_or_else(
+					|| mapping.runtime_path.clone(),
+					|rel| gopath::join(&[runtime_pkg_dir, &rel]),
+				);
+			PackageExportMapping {
+				types_path: mapping.types_path.clone(),
+				runtime_path,
+				subpath: mapping.subpath.clone(),
+				custom: mapping.custom,
+			}
+		})
+		.collect()
 }
 
 /// `remapToRojoTree`: a runtime path outside the package's Rojo tree `$path` is moved into it.

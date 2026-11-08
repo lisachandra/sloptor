@@ -100,6 +100,8 @@ pub fn collect(command: BuildCommand) -> Result<BuildArgs, Failure> {
 			allow_comment_directives: command.allow_comment_directives,
 			luau: command.luau,
 			luau_types: command.luau_types,
+			// `rbxts.runtimeRoots` is tsconfig-only: no CLI flag sets it.
+			..PartialOptions::default()
 		},
 		build: command.build.is_some(),
 		build_path: command.build.unwrap_or_default(),

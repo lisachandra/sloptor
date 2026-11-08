@@ -63,6 +63,7 @@ pub(crate) fn prepare_package_layout(
 		&type_roots,
 		rotor_tsrs::vfs::osvfs::fs().use_case_sensitive_file_names(),
 		options.custom_conditions.as_deref().unwrap_or_default(),
+		opts.runtime_roots.as_deref().unwrap_or_default(),
 		&remap,
 	);
 	Ok(Some(PackageLayout {
